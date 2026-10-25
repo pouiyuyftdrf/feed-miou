@@ -15,7 +15,9 @@ L'app s'ouvre ensuite en plein écran, avec la photo de Miou Miou comme icône.
 - `index.html` : toute l'app (HTML, CSS, JS), sans étape de build.
 - `sw.js` : démarrage hors ligne. La page est rechargée depuis le réseau à chaque ouverture, donc une mise à jour poussée sur GitHub arrive tout de suite.
 - Données : table `feedmiou_docs` dans le projet Supabase « Caminada ». Une ligne par document (`path`, `col`, `data`).
-  Sans le code de la coloc (en-tête `x-coloc-code`), la table renvoie zéro ligne et refuse toute écriture.
+  - Chiffrement de bout en bout : chaque document est chiffré sur le téléphone (AES-GCM, clé dérivée du code de la coloc par PBKDF2). La base, et donc quiconque administre Caminada, ne voit que du texte chiffré. Seuls le chemin (`feeds/2026-10-25_…`) et la date de modification restent lisibles.
+  - En plus, sans le code de la coloc (en-tête `x-coloc-code`), la table renvoie zéro ligne et refuse toute écriture.
+  - Conséquence : si le code de la coloc est perdu, les données ne sont plus lisibles. Garde `lien-coloc.txt` précieusement.
 - Synchronisation : chaque modification prévient les autres appareils ouverts ; sinon rafraîchissement toutes les 30 s et à chaque retour sur l'app.
 
 Le code de la coloc n'est pas dans ce dépôt : il est dans `lien-coloc.txt`, ignoré par git.

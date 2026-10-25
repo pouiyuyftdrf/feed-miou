@@ -625,7 +625,7 @@ const Sound = (() => {
 
 /* ---------- storage: shared db when the viewer serves it, this device otherwise ---------- */
 const Store = (() => {
-  let db = null, sb = null, chan = null, code = "", mode = "local";
+  let db = null, sb = null, chan = null, code = "", mode = "local", aesKey = null;
   const LS = "feedmiou.data.v1", LS_CACHE = "feedmiou.sbcache.v1", LS_CODE = "feedmiou.code";
   let mem = {};
   const docL = new Map(), colL = new Map(), queues = new Map(), cache = new Map(), wheres = new Map();
@@ -649,6 +649,27 @@ const Store = (() => {
     else if (!navigator.onLine || (e && /fetch|network|load failed/i.test(e.message || ""))) toast("Pas de connexion : la modification n'a pas été enregistrée.");
     else toast("Impossible d'enregistrer pour l'instant. Réessaie dans un moment.");
   }
+  /* End-to-end encryption: documents are sealed with AES-GCM under a key derived from the coloc code,
+     so the database only ever holds ciphertext. The path is bound as additional data. */
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  function toB64(u8) { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+  function fromB64(b) { const s = atob(b), u8 = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i); return u8; }
+  async function deriveKey(c) {
+    const base = await crypto.subtle.importKey("raw", enc.encode(c), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey({ name: "PBKDF2", salt: enc.encode("feedmiou-v1"), iterations: 210000, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  }
+  async function seal(path, obj) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: enc.encode(path) }, aesKey, enc.encode(JSON.stringify(obj))));
+    const all = new Uint8Array(12 + ct.length); all.set(iv); all.set(ct, 12);
+    return { v: 1, e: toB64(all) };
+  }
+  async function unseal(path, d) {
+    if (!d || typeof d.e !== "string") return d;
+    const all = fromB64(d.e);
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: all.subarray(0, 12), additionalData: enc.encode(path) }, aesKey, all.subarray(12));
+    return JSON.parse(dec.decode(pt));
+  }
   /* Supabase mode: one row per document in feedmiou_docs, a cache kept on the device for instant start */
   function pick(docs, f) { if (!f) return { ...docs }; const o = {}; for (const k in docs) if (f(docs[k])) o[k] = docs[k]; return o; }
   function sbNotify(col) {
@@ -658,12 +679,14 @@ const Store = (() => {
   }
   function persist() { try { localStorage.setItem(LS_CACHE, JSON.stringify(Object.fromEntries(cache))); } catch (e) {} }
   async function sbFetch(col) {
-    if (!sb) return;
+    if (!sb || !aesKey) return;
     let q = sb.from("feedmiou_docs").select("path,data").eq("col", col);
-    const w = wheres.get(col); if (w) q = q.gte(`data->>${w[0]}`, w[2]);
+    // contents are encrypted, so the only server-side filter is the path (feed ids start with their date)
+    const w = wheres.get(col); if (w && col === "feeds") q = q.gte("path", `feeds/${w[2]}`);
     const { data, error } = await q.limit(5000);
     if (error || !data) return;
-    const o = {}; for (const r of data) o[idOf(r.path)] = r.data;
+    const o = {};
+    await Promise.all(data.map(async (r) => { try { o[idOf(r.path)] = await unseal(r.path, r.data); } catch (e) {} }));
     cache.set(col, o); persist(); sbNotify(col);
   }
   const watchedCols = () => new Set([...colL.keys(), ...[...docL.keys()].map(colOf)]);
@@ -695,6 +718,7 @@ const Store = (() => {
       if (error) throw error;
       if (!data) return false;
       if (code && code !== c) cache.clear();
+      aesKey = await deriveKey(c);
       sb = client; code = c;
       try { localStorage.setItem(LS_CODE, c); } catch (e) {}
       try {
@@ -731,7 +755,8 @@ const Store = (() => {
         const col = colOf(path), docs = { ...(cache.get(col) || {}) };
         docs[idOf(path)] = clone(data); cache.set(col, docs); persist(); sbNotify(col);
         return enqueue(path, async () => {
-          const { error } = await sb.from("feedmiou_docs").upsert({ path, col, data, updated_at: new Date().toISOString() });
+          const sealed = await seal(path, data);
+          const { error } = await sb.from("feedmiou_docs").upsert({ path, col, data: sealed, updated_at: new Date().toISOString() });
           if (error) throw error; nudge(col);
         }).catch((e) => { onErr(e); sbFetch(col); });
       }
@@ -777,7 +802,7 @@ function newDraft() {
   };
 }
 
-const feederList = () => Object.entries(state.feeders).map(([id, f]) => ({ id, ...f })).sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
+const feederList = () => Object.entries(state.feeders).map(([id, f]) => ({ id, ...f })).filter((f) => typeof f.name === "string").sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
 const feeder = (id) => state.feeders[id] ? { id, ...state.feeders[id] } : null;
 const meFeeder = () => feeder(state.me);
 function resolveMe() {
