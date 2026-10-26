@@ -34,3 +34,45 @@ self.addEventListener("fetch", (e) => {
     })));
   }
 });
+
+// Push: the server only relays a text sealed on a phone with the coloc key. The page leaves that key
+// (and who uses this phone) in IndexedDB; without it, a plain fallback text is shown.
+function kv(k) {
+  return new Promise((res) => {
+    const r = indexedDB.open("feedmiou", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("kv");
+    r.onerror = () => res(null);
+    r.onsuccess = () => {
+      const db = r.result, q = db.transaction("kv").objectStore("kv").get(k);
+      q.onsuccess = () => { db.close(); res(q.result || null); };
+      q.onerror = () => { db.close(); res(null); };
+    };
+  });
+}
+
+async function openPush(p) {
+  const s = await kv("push");
+  const all = Uint8Array.from(atob(p.e), (c) => c.charCodeAt(0));
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: all.subarray(0, 12), additionalData: new TextEncoder().encode("push/" + p.id) }, s.key, all.subarray(12));
+  const m = JSON.parse(new TextDecoder().decode(pt));
+  const who = m.garde && m.garde === s.me ? m.whoMe : m.who;
+  return { title: m.title, body: [p.left < p.total && m.part ? m.part : m.body, who].filter(Boolean).join(" "), tag: m.tag };
+}
+
+self.addEventListener("push", (e) => {
+  e.waitUntil((async () => {
+    let p = {}, n = null;
+    try { p = e.data ? e.data.json() : {}; n = await openPush(p); } catch (err) {}
+    if (!n) n = { title: "Feed Miou", body: p.kind === "late" ? "Un repas est en retard." : "Un repas vient d'être donné." };
+    // same tag for a meal's "late" and "fed" notifications, so the second replaces the first
+    await self.registration.showNotification(n.title, { body: n.body, tag: n.tag, renotify: !!n.tag, icon: "icons/icon-192.png", lang: "fr" });
+  })());
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+    const open = list.find((c) => c.url.startsWith(self.registration.scope));
+    return open ? open.focus() : self.clients.openWindow(self.registration.scope);
+  }));
+});
