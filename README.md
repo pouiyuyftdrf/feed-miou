@@ -34,7 +34,7 @@ Comment c'est fait :
 - Le téléphone qui coche une portion dépose l'alerte dans `feedmiou_alerts`. Pour les retards, chaque téléphone ouvert envoie la liste des vérifications des 14 prochains jours, et la remet à jour quand les horaires, les portions ou les gardes changent. Si personne n'ouvre l'app pendant deux semaines, les alertes de retard s'arrêtent.
 - Toutes les 30 s, `pg_cron` regarde s'il y a une alerte à envoyer et appelle alors la fonction `feedmiou-push` (`supabase/functions/feedmiou-push`), qui l'envoie en Web Push (chiffrement RFC 8291 et clés VAPID, sans dépendance).
 - Les textes sont chiffrés avec le code de la coloc comme le reste ; c'est `sw.js` qui les déchiffre sur le téléphone. Le serveur voit seulement l'heure de chaque vérification (heure du repas + 45 min) et les chemins des portions à vérifier.
-- Clés VAPID : la publique est dans `index.html` (`push`), la privée dans le Vault Supabase (`feedmiou_vapid`). Si on change la paire, chacun doit couper puis réactiver les notifications.
+- Clés VAPID : la fonction les fabrique à son premier appel et les range dans le Vault Supabase (`feedmiou_vapid`), donc la clé privée ne sort jamais du serveur. La clé publique est recopiée dans `index.html` (`push`). Si on change la paire, chacun doit couper puis réactiver les notifications.
 - Le SQL est dans `supabase/migrations/`. Test du chiffrement Web Push : `node tests/webpush.test.ts` (Node 22.6 ou plus).
 
 ## Mettre à jour

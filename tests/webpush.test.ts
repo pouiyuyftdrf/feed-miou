@@ -3,7 +3,7 @@
 // node:crypto (independent of WebCrypto), and verifies the VAPID signature.
 import { createECDH, createDecipheriv, hkdfSync, createPublicKey, verify } from "node:crypto";
 import assert from "node:assert/strict";
-import { encrypt, vapidHeader, b64u, fromB64u } from "../supabase/functions/feedmiou-push/webpush.ts";
+import { encrypt, vapidHeader, makeVapid, b64u, fromB64u } from "../supabase/functions/feedmiou-push/webpush.ts";
 
 const te = new TextEncoder();
 
@@ -47,3 +47,13 @@ assert.equal(m[4], vapid.publicKey);
 const pubKey = createPublicKey({ key: { kty: "EC", crv: "P-256", x: b64u(v.getPublicKey().subarray(1, 33)), y: b64u(v.getPublicKey().subarray(33)) }, format: "jwk" });
 assert.ok(verify("sha256", Buffer.from(`${m[1]}.${m[2]}`), { key: pubKey, dsaEncoding: "ieee-p1363" }, Buffer.from(fromB64u(m[3]))));
 console.log("ok  VAPID signature");
+
+// A key pair from makeVapid signs headers that verify against its own public key
+const made = await makeVapid("https://example.org/");
+const h2 = /^vapid t=([^.]+)\.([^.]+)\.([^,]+), k=(.+)$/.exec(await vapidHeader("https://fcm.googleapis.com/fcm/send/x", made));
+assert.ok(h2);
+const pub2 = fromB64u(made.publicKey);
+assert.equal(pub2.length, 65);
+const madeKey = createPublicKey({ key: { kty: "EC", crv: "P-256", x: b64u(pub2.subarray(1, 33)), y: b64u(pub2.subarray(33)) }, format: "jwk" });
+assert.ok(verify("sha256", Buffer.from(`${h2[1]}.${h2[2]}`), { key: madeKey, dsaEncoding: "ieee-p1363" }, Buffer.from(fromB64u(h2[3]))));
+console.log("ok  makeVapid key pair");

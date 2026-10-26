@@ -2,7 +2,11 @@
 // It claims the due alerts, sends each one to the subscribed phones and forgets the phones whose
 // push service says the subscription is gone. Calling it when nothing is due does nothing, so it
 // needs no caller authentication (deployed with verify_jwt = false).
-import { sendPush, type Subscription, type Vapid } from "./webpush.ts";
+// The first call also makes the VAPID key pair and keeps it in Vault: the private key never leaves
+// the server, and the public one gets copied into index.html.
+import { makeVapid, sendPush, type Subscription, type Vapid } from "./webpush.ts";
+
+const SUBJECT = "https://pouiyuyftdrf.github.io/feed-miou/";
 
 type Job = { id: string; kind: "fed" | "late"; left: number; total: number; payload: { e: string }; subs: Subscription[] };
 
@@ -24,9 +28,9 @@ async function rpc(name: string, args: unknown = {}) {
 
 Deno.serve(async () => {
   try {
-    const { jobs, vapid } = await rpc("feedmiou_push_claim") as { jobs: Job[]; vapid: Vapid | null };
-    if (!jobs.length) return Response.json({ sent: 0 });
-    if (!vapid) throw new Error("no feedmiou_vapid secret in Vault");
+    const claim = await rpc("feedmiou_push_claim") as { jobs: Job[]; vapid: Vapid | null };
+    const jobs = claim.jobs, vapid: Vapid = claim.vapid || await rpc("feedmiou_vapid_init", { p_vapid: await makeVapid(SUBJECT) });
+    if (!jobs.length) return Response.json({ sent: 0, publicKey: vapid.publicKey });
     const gone = new Set<string>();
     let sent = 0;
     await Promise.all(jobs.flatMap((j) => j.subs.map(async (s) => {

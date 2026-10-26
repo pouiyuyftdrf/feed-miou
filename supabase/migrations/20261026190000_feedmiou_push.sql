@@ -10,6 +10,8 @@
 -- (feedmiou_push_claim decides which ones still apply) and sends them with Web Push.
 -- The VAPID key pair lives in Vault under the name feedmiou_vapid:
 --   {"publicKey": "...", "privateKey": "...", "subject": "https://..."}
+-- The edge function makes it on its first call (feedmiou_vapid_init), so the private key never
+-- leaves the server; the public key is copied into index.html.
 
 create extension if not exists pg_net with schema extensions;
 create extension if not exists pg_cron with schema pg_catalog;
@@ -162,6 +164,15 @@ returns void language sql security definer set search_path = '' as $$
   delete from public.feedmiou_push_subs where endpoint = any(p_endpoints)
 $$;
 
+create or replace function public.feedmiou_vapid_init(p_vapid jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+begin
+  if not exists (select 1 from vault.secrets where name = 'feedmiou_vapid') then
+    perform vault.create_secret(p_vapid::text, 'feedmiou_vapid', 'Feed Miou : clés des notifications');
+  end if;
+  return (select decrypted_secret::jsonb from vault.decrypted_secrets where name = 'feedmiou_vapid' limit 1);
+end $$;
+
 create or replace function public.feedmiou_push_tick()
 returns void language plpgsql security definer set search_path = '' as $$
 begin
@@ -173,8 +184,8 @@ begin
   end if;
 end $$;
 
-revoke all on function public.feedmiou_push_claim(), public.feedmiou_push_gone(text[]), public.feedmiou_push_tick() from public, anon, authenticated;
-grant execute on function public.feedmiou_push_claim(), public.feedmiou_push_gone(text[]) to service_role;
+revoke all on function public.feedmiou_push_claim(), public.feedmiou_push_gone(text[]), public.feedmiou_vapid_init(jsonb), public.feedmiou_push_tick() from public, anon, authenticated;
+grant execute on function public.feedmiou_push_claim(), public.feedmiou_push_gone(text[]), public.feedmiou_vapid_init(jsonb) to service_role;
 
 select cron.schedule('feedmiou-push', '30 seconds', 'select public.feedmiou_push_tick()');
 select cron.schedule('feedmiou-cron-cleanup', '23 4 * * *',

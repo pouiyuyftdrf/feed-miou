@@ -65,6 +65,14 @@ export async function encrypt(sub: Subscription, plaintext: Uint8Array, fixed?: 
   return cat(header, asPublic, ct);
 }
 
+// A fresh VAPID key pair: the public key as the browser wants it (raw point), the private one as a JWK "d".
+export async function makeVapid(subject: string): Promise<Vapid> {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
+  const pub = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+  const { d } = await crypto.subtle.exportKey("jwk", pair.privateKey);
+  return { publicKey: b64u(pub), privateKey: d!, subject };
+}
+
 // VAPID JWT, signed with ES256. WebCrypto already returns the raw r || s signature JWT expects.
 export async function vapidHeader(endpoint: string, vapid: Vapid, now = Date.now()) {
   const pub = fromB64u(vapid.publicKey);
