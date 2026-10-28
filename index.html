@@ -1168,7 +1168,7 @@ function renderToday() {
   const pushHint = !Push.prefs.hint && (ps === "off" || ps === "install") ? `<p class="hint">${ICONS.bell}<span>${ps === "install"
       ? `Pour recevoir une notif quand ${esc(cat.name)} a mangé ou attend son repas, installe d'abord l'app sur l'écran d'accueil.`
       : `Recevoir une notif quand ${esc(cat.name)} a mangé ou attend son repas ?`}</span>${ps === "off" ? `<button class="btn small primary" data-act="push-on">Activer</button>` : ""}<button class="btn ghost small" data-act="push-hint" aria-label="Masquer">×</button></p>` : "";
-  const hint = total && !seenHint() ? `<p class="hint">${PAW}<span>Touchez une portion dès qu'elle est servie. Touchez-la à nouveau pour annuler ou changer qui l'a donnée.</span><button class="btn ghost small" data-act="dismiss-hint" aria-label="Masquer l'astuce">×</button></p>` : "";
+  const hint = total && !seenHint() ? `<p class="hint">${PAW}<span>Touchez une portion dès qu'elle est servie. Touchez-la à nouveau pour annuler, changer l'heure ou qui l'a donnée.</span><button class="btn ghost small" data-act="dismiss-hint" aria-label="Masquer l'astuce">×</button></p>` : "";
   const notes = Object.entries(state.notes).filter(([, n]) => n.date === key).sort((a, b) => a[1].at - b[1].at);
   return `
   <section class="card mood" aria-label="Humeur de ${esc(cat.name)}">
@@ -1451,8 +1451,14 @@ const closeSheet = () => { $("#sheet-root").innerHTML = ""; };
 
 function doneSheet(slot, id) {
   const it = slotItems(slot).find((x) => x.id === id), key = dateKey(), f = feedFor(key, id); if (!it || !f) return;
-  const sl = SLOTS.find((s) => s.k === slot), by = feeder(f.by);
-  openSheet(`<h2>${esc(TYPES[it.type])} · ${sl.label}</h2><p class="sub">Donné à ${hFmt(f.at)} par ${esc(by ? by.name : "?")}</p>
+  const sl = SLOTS.find((s) => s.k === slot), by = feeder(f.by), d = new Date(f.at);
+  const noted = f.notedAt && hFmt(f.notedAt) !== hFmt(f.at) ? ` · noté à ${hFmt(f.notedAt)}` : "";
+  openSheet(`<h2>${esc(TYPES[it.type])} · ${sl.label}</h2><p class="sub">Donné à ${hFmt(f.at)} par ${esc(by ? by.name : "?")}${noted}</p>
+    <form class="form" data-form="feed-time" data-id="${id}">
+      <div class="two"><label class="field"><span>Donné en vrai à</span><input id="fd-time" name="time" type="time" required value="${pad(d.getHours())}:${pad(d.getMinutes())}"></label>
+      <button class="btn primary" type="submit" style="align-self:end;min-height:48px">Changer l'heure</button></div>
+      <div class="pills"><button type="button" class="btn small" data-act="feed-time" data-id="${id}" data-t="${esc(slotTime(slot))}">À l'heure prévue · ${tFmt(slotTime(slot))}</button></div>
+    </form>
     <p class="label">Ce n'était pas ${esc(by ? by.name : "cette personne")} ? Choisis qui l'a donné :</p>
     <div class="who-grid">${feederList().map((x) => `<button class="who ${x.id === f.by ? "me" : ""}" data-act="change-by" data-id="${id}" data-by="${x.id}" aria-pressed="${x.id === f.by}">${av(x, "lg")}${esc(x.name)}</button>`).join("")}</div>
     <button class="btn block danger" data-act="unfeed" data-id="${id}">Annuler : pas encore donné</button>`);
@@ -1551,6 +1557,19 @@ function feed(slot, id, by) {
   const key = dateKey();
   return Store.set(`feeds/${key}_${id}`, { date: key, itemId: id, slot, by, at: Date.now(), type: it.type, stockId: it.stockId || "", portion: parseNum(it.portion) });
 }
+function setFeedTime(id, hhmm) {
+  const key = dateKey(), f = feedFor(key, id); closeSheet(); if (!f || !/^\d{1,2}:\d{2}/.test(hhmm)) return;
+  const d = fromKey(key), m = toMin(hhmm); d.setHours(Math.floor(m / 60), m % 60, 0, 0);
+  const at = d.getTime();
+  if (at > Date.now()) { toast("Cette heure n'est pas encore passée"); return; }
+  if (Math.floor(at / 60000) === Math.floor(f.at / 60000)) return;
+  // les portions cochées du même geste (« J'ai tout donné ») suivent la correction
+  for (const it of slotItems(f.slot)) {
+    const g = feedFor(key, it.id);
+    if (g && g.by === f.by && Math.abs(g.at - f.at) < 10000) Store.set(`feeds/${key}_${it.id}`, { ...clone(g), at, notedAt: g.notedAt || g.at });
+  }
+  Sound.play("tap"); toast(`Corrigé : donné à ${hFmt(at)}`);
+}
 function autoRota(fl) {
   const r = {}; if (!fl.length) return r;
   for (let d = 0; d < 7; d++) SLOTS.forEach((sl, i) => { r[`${d}-${sl.k}`] = fl[(d + i) % fl.length].id; });
@@ -1560,7 +1579,7 @@ function feedNow(slot, ids, by) {
   const key = dateKey(); ids = ids.filter((id) => !feedFor(key, id));
   const items = slotItems(slot).filter((it) => ids.includes(it.id)); if (!items.length) return;
   const left = (k) => slotItems(k).filter((it) => !feedFor(key, it.id) && !ids.includes(it.id)).length;
-  const dayDone = SLOTS.every((s) => left(s.k) === 0), slotDone = left(slot) === 0;
+  const dayDone = SLOTS.every((s) => left(s.k) === 0), slotDone = left(slot) === 0, late = slotStatus(slot).s === "late";
   const writes = items.map((it) => feed(slot, it.id, by));
   Push.fed(slot, items, by, writes);
   const t = items[0].type;
@@ -1568,6 +1587,7 @@ function feedNow(slot, ids, by) {
   if (dayDone) { Sound.play("purr", 380); Sound.play("meow", 1250); } else if (slotDone) Sound.play("meow", 380);
   try { localStorage.setItem("feedmiou.hint", "1"); } catch (e) {}
   const f = feeder(by);
+  if (late) { toast(`Noté à ${hFmt(Date.now())}. Donné plus tôt ?`, { label: "Changer l'heure", fn: () => doneSheet(slot, items[0].id) }); return; }
   toast(by === state.me ? "C'est noté, merci !" : `Noté pour ${f ? f.name : "?"}`, { label: "Annuler", fn: () => { ids.forEach((id) => Store.remove(`feeds/${key}_${id}`)); Sound.play("undo"); } });
 }
 async function finishFlow() {
@@ -1624,6 +1644,7 @@ const ACT = {
   "switch-me": () => { state.forceWho = true; closeSheet(); render(); window.scrollTo(0, 0); },
   feed: (ds) => feedFor(dateKey(), ds.id) ? doneSheet(ds.slot, ds.id) : feedNow(ds.slot, [ds.id], state.me),
   "do-feed-all": (ds) => { closeSheet(); feedNow(ds.slot, slotItems(ds.slot).map((x) => x.id), state.me); },
+  "feed-time": (ds) => setFeedTime(ds.id, ds.t),
   unfeed: (ds) => { Store.remove(`feeds/${dateKey()}_${ds.id}`); closeSheet(); Sound.play("undo"); toast("Distribution annulée"); },
   "add-note": (ds) => noteSheet(ds.kind),
   "del-note": (ds) => { const p = `notes/${ds.id}`, prev = clone(state.notes[ds.id]); Store.remove(p); Sound.play("undo"); toast("Note supprimée", { label: "Annuler", fn: () => { if (prev) Store.set(p, prev); Sound.play("pop"); } }); },
@@ -1668,6 +1689,7 @@ const FORMS = {
     if (i >= 0) slots[slot].items[i] = it; else slots[slot].items.push(it);
     savePlan(ctx, slots); closeSheet(); Sound.play("pop");
   },
+  "feed-time": (fd, form) => setFeedTime(form.dataset.id, String(fd.get("time") || "")),
   note: (fd, form) => { const kind = form.dataset.kind === "sante" || fd.get("sante") ? "sante" : "note"; Store.set(`notes/${uid()}`, { date: dateKey(), at: Date.now(), by: state.me, text: fd.get("text").trim(), kind }); closeSheet(); Sound.play("blop"); toast("Note partagée"); },
   stock: (fd, form) => { const id = form.dataset.id || uid(); Store.set(`stock/${id}`, { name: fd.get("name").trim(), type: fd.get("type") || "croquettes", unit: fd.get("unit"), qty: parseNum(fd.get("qty")), restockAt: Date.now(), alertDays: parseNum(fd.get("alertDays")) || 5 }); closeSheet(); Sound.play("crunch"); toast("Stock enregistré"); },
   restock: (fd, form) => {
