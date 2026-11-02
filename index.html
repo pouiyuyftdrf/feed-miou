@@ -236,6 +236,7 @@ p { margin: 0; }
 .li .t { font-weight: 700; }
 .li .s { font-size: 13px; color: var(--ink-soft); }
 .li-open { background: none; border: 0; padding: 0; text-align: left; }
+.li-tap { cursor: pointer; }
 .empty { text-align: center; color: var(--ink-soft); padding: 18px 8px; font-size: 14px; }
 
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 700; border-radius: 999px; padding: 10px 16px; border: var(--card-border); background: var(--surface); color: var(--ink); box-shadow: var(--card-shadow); text-decoration: none; }
@@ -920,20 +921,23 @@ const Push = (() => {
     for (let i = 0; i < 14; i++) {
       const d = addDays(new Date(), i), key = dateKey(d);
       for (const sl of SLOTS) {
-        const items = slotItems(sl.k); if (!items.length) continue;
-        const at = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, toMin(slotTime(sl.k)) + LATE_MIN).getTime();
-        if (at <= now) continue;
-        const g = feeder(rotaFor(d, sl.k)), lead = `Prévu à ${tFmt(slotTime(sl.k))}`;
-        out.push({ id: `late_${key}_${sl.k}`, at, paths: items.map((it) => `feeds/${key}_${it.id}`), msg: {
-          title: `${catName()} attend son repas ${OF[sl.k]}`,
-          body: `${lead}, personne ne l'a encore coché.`,
-          part: `${lead}, il n'est coché qu'en partie.`,
-          ...(g ? { garde: g.id, who: `${g.name} est de garde ${THIS[sl.k]}.`, whoMe: `C'est toi qui es de garde ${THIS[sl.k]}.` } : {}),
-          tag: `${key}_${sl.k}`
-        } });
+        const g = feeder(rotaFor(d, sl.k));
+        // one check per time within the meal; the server only takes letters after the date, so the meal's later times are matinb, matinc…
+        slotTimes(sl.k).forEach((t, n) => {
+          const at = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, toMin(t) + LATE_MIN).getTime();
+          if (at <= now) return;
+          const items = slotItems(sl.k).filter((it) => itemTime(sl.k, it) === t), lead = `Prévu à ${tFmt(t)}`;
+          out.push({ id: `late_${key}_${sl.k}${n ? String.fromCharCode(97 + n) : ""}`, at, paths: items.map((it) => `feeds/${key}_${it.id}`), msg: {
+            title: `${catName()} attend son repas ${OF[sl.k]}`,
+            body: `${lead}, personne ne l'a encore coché.`,
+            part: `${lead}, il n'est coché qu'en partie.`,
+            ...(g ? { garde: g.id, who: `${g.name} est de garde ${THIS[sl.k]}.`, whoMe: `C'est toi qui es de garde ${THIS[sl.k]}.` } : {}),
+            tag: `${key}_${sl.k}`
+          } });
+        });
       }
     }
-    return out;
+    return out.slice(0, 200); // the server refuses a longer list
   }
   async function syncAlarms() {
     const list = alarms(), sig = JSON.stringify(list);
@@ -990,6 +994,11 @@ function currentSkin() {
 const slotsOf = (cfg) => (cfg && cfg.slots) || {};
 const slotItems = (k) => (slotsOf(state.config)[k] || {}).items || [];
 const slotTime = (k) => (slotsOf(state.config)[k] || {}).time || SLOTS.find((s) => s.k === k).time;
+// each portion has its own time; one saved before that follows its meal's
+const itemTime = (k, it) => it.time || slotTime(k);
+const byTime = (a, b) => toMin(a) - toMin(b);
+const slotTimes = (k) => [...new Set(slotItems(k).map((it) => itemTime(k, it)))].sort(byTime);
+const isLate = (k, it, date = new Date()) => date.getHours() * 60 + date.getMinutes() > toMin(itemTime(k, it)) + LATE_MIN;
 const feedFor = (date, itemId) => state.feeds[`${date}_${itemId}`];
 const rotaFor = (d, k) => (state.config && state.config.rota || {})[`${dow(d)}-${k}`] || "";
 
@@ -1062,13 +1071,14 @@ function av(f, cls = "") { if (!f) return `<span class="av ${cls}" style="--c:#9
 /* ---------- derived ---------- */
 function slotStatus(k, date = new Date()) {
   const items = slotItems(k); if (!items.length) return { s: "none" };
-  const key = dateKey(date);
-  const done = items.filter((it) => feedFor(key, it.id)).length;
-  if (done === items.length) return { s: "done", done, total: items.length };
-  const now = date.getHours() * 60 + date.getMinutes(), t = toMin(slotTime(k));
-  if (now > t + LATE_MIN) return { s: "late", done, total: items.length };
-  if (now >= t - 30) return { s: "now", done, total: items.length };
-  return { s: "later", done, total: items.length };
+  const key = dateKey(date), left = items.filter((it) => !feedFor(key, it.id)), done = items.length - left.length;
+  if (!left.length) return { s: "done", done, total: items.length };
+  // the meal shows its most urgent portion: the earliest one still to give
+  const now = date.getHours() * 60 + date.getMinutes(), at = left.map((it) => itemTime(k, it)).sort(byTime)[0], t = toMin(at);
+  // what "J'ai tout donné" covers: the portions already due, or else the next ones
+  const due = left.filter((it) => toMin(itemTime(k, it)) <= Math.max(t, now + 30));
+  const s = now > t + LATE_MIN ? "late" : now >= t - 30 ? "now" : "later";
+  return { s, done, total: items.length, at, due };
 }
 function stockInfo(id) {
   const s = state.stock[id]; if (!s) return null;
@@ -1184,18 +1194,18 @@ function renderToday() {
     : !next ? { s: "done", say: "Miam, merci ! J'ai tout eu aujourd'hui." }
     : st.s === "late" ? { s: "late", say: `J'ai faim ! Le repas ${OF[next.k]} est en retard.` }
     : st.s === "now" ? { s: "now", say: `À table ! C'est le repas ${OF[next.k]}.` }
-    : { s: "later", say: done ? `Je digère. Prochain repas à ${tFmt(slotTime(next.k))}.` : `Je fais la sieste jusqu'à ${tFmt(slotTime(next.k))}.` };
+    : { s: "later", say: done ? `Je digère. Prochain repas à ${tFmt(st.at)}.` : `Je fais la sieste jusqu'à ${tFmt(st.at)}.` };
   const dots = Array.from({ length: total }, (_, i) => `<i class="${i < done ? "on" : ""}"></i>`).join("");
 
   let nextCard = "";
   if (next) {
-    const rem = slotItems(next.k).filter((it) => !feedFor(key, it.id)), g = feeder(rotaFor(now, next.k));
+    const rem = st.due, g = feeder(rotaFor(now, next.k));
     const eyebrow = st.s === "late" ? "En retard" : st.s === "now" ? "C'est l'heure" : "Prochain repas";
     nextCard = `<section class="card next" aria-label="${eyebrow}">
-      <div class="next-txt"><span class="chip plain ${st.s === "late" ? "danger" : st.s === "now" ? "warn" : ""}">${eyebrow} · ${next.label} ${tFmt(slotTime(next.k))}</span>
+      <div class="next-txt"><span class="chip plain ${st.s === "late" ? "danger" : st.s === "now" ? "warn" : ""}">${eyebrow} · ${next.label} ${tFmt(st.at)}</span>
         <strong>${rem.map((it) => `${esc(TYPES[it.type] || it.type)} <span class="muted">${esc(it.qty)}</span>`).join(" + ")}</strong>
         ${g ? `<span class="row small">${av(g, "sm")}${g.id === state.me ? "Tu es de garde" : `${esc(g.name)} est de garde`}</span>` : ""}</div>
-      <button class="btn primary go" data-act="do-feed-all" data-slot="${next.k}">${PAW}<span>${rem.length > 1 ? "J'ai tout donné" : "C'est donné"}</span></button>
+      <button class="btn primary go" data-act="do-feed-all" data-slot="${next.k}" data-ids="${rem.map((it) => it.id).join(",")}">${PAW}<span>${rem.length > 1 ? "J'ai tout donné" : "C'est donné"}</span></button>
     </section>`;
   }
 
@@ -1222,20 +1232,21 @@ function renderToday() {
   ${SLOTS.map((sl) => renderSlot(sl, now)).join("")}
   <section class="section">
     <div class="section-head"><h2>Notes du jour</h2><button class="btn small" data-act="add-note">${ICONS.plus}Ajouter</button></div>
-    ${notes.length ? `<div class="card list">${notes.map(([id, n]) => `<div class="li">${av(feeder(n.by), "sm")}<button class="grow li-open" data-act="note-edit" data-id="${id}" aria-label="Modifier la note"><div>${esc(n.text)}</div><div class="s">${hFmt(n.at)} · ${esc((feeder(n.by) || {}).name || "")}${n.kind === "sante" ? " · santé" : ""}</div></button><button class="btn ghost small" data-act="del-note" data-id="${id}" aria-label="Supprimer la note">×</button></div>`).join("")}</div>`
+    ${notes.length ? `<div class="card list">${notes.map(([id, n]) => `<div class="li li-tap" data-act="note-edit" data-id="${id}">${av(feeder(n.by), "sm")}<button class="grow li-open" data-act="note-edit" data-id="${id}" aria-label="Modifier la note"><div>${esc(n.text)}</div><div class="s">${hFmt(n.at)} · ${esc((feeder(n.by) || {}).name || "")}${n.kind === "sante" ? " · santé" : ""}</div></button><button class="btn ghost small" data-act="del-note" data-id="${id}" aria-label="Supprimer la note">×</button></div>`).join("")}</div>`
       : `<p class="empty card">Rien à signaler. Une gamelle boudée, un vomi, un câlin record ? Note-le ici pour les autres.</p>`}
   </section>`;
 }
 function renderSlot(sl, now) {
-  const items = slotItems(sl.k); if (!items.length) return "";
+  const items = slotItems(sl.k).slice().sort((a, b) => byTime(itemTime(sl.k, a), itemTime(sl.k, b))); if (!items.length) return "";
   const key = dateKey(now), st = slotStatus(sl.k, now), g = feeder(rotaFor(now, sl.k));
-  const chip = st.s === "done" ? `<span class="chip plain ok">Fait</span>` : st.s === "late" ? `<span class="chip plain danger">En retard</span>` : st.s === "now" ? `<span class="chip plain warn">C'est l'heure</span>` : `<span class="chip plain">À ${tFmt(slotTime(sl.k))}</span>`;
+  const times = slotTimes(sl.k).map(tFmt).join(" · ");
+  const chip = st.s === "done" ? `<span class="chip plain ok">Fait</span>` : st.s === "late" ? `<span class="chip plain danger">En retard</span>` : st.s === "now" ? `<span class="chip plain warn">C'est l'heure</span>` : `<span class="chip plain">À ${tFmt(st.at)}</span>`;
   return `<section class="slot" id="slot-${sl.k}">
-    <div class="slot-head"><h2>${sl.label}</h2><button class="time-btn tnum" data-act="slot-time" data-ctx="live" data-slot="${sl.k}" aria-label="Changer l'heure du repas ${OF[sl.k]} (${tFmt(slotTime(sl.k))})">${tFmt(slotTime(sl.k))}</button><span class="spacer"></span>${g ? `<span class="chip">${av(g, "sm")}${esc(g.name)} de garde</span>` : ""}${chip}</div>
+    <div class="slot-head"><h2>${sl.label}</h2><button class="time-btn tnum" data-act="slot-time" data-ctx="live" data-slot="${sl.k}" aria-label="Changer les heures du repas ${OF[sl.k]} (${times})">${times}</button><span class="spacer"></span>${g ? `<span class="chip">${av(g, "sm")}${esc(g.name)} de garde</span>` : ""}${chip}</div>
     <div class="items">${items.map((it) => {
       const f = feedFor(key, it.id);
       if (f) { const by = feeder(f.by); return `<button class="item done" data-act="feed" data-slot="${sl.k}" data-id="${it.id}" aria-label="${esc(TYPES[it.type])} donné par ${esc(by ? by.name : "")}">${CHECK}<span class="by">Distribué à ${hFmt(f.at)}<br>par ${esc(by ? by.name : "?")}</span></button>`; }
-      return `<button class="item" data-act="feed" data-slot="${sl.k}" data-id="${it.id}"><span class="ty">${esc(TYPES[it.type] || it.type)}</span>${foodSVG(it.type)}<span class="qty">${esc(it.qty)}${it.time ? ` · ${tFmt(it.time)}` : ""}</span></button>`;
+      return `<button class="item" data-act="feed" data-slot="${sl.k}" data-id="${it.id}"><span class="ty">${esc(TYPES[it.type] || it.type)}</span>${foodSVG(it.type)}<span class="qty">${esc(it.qty)}${times.includes(" · ") ? ` · ${tFmt(itemTime(sl.k, it))}` : ""}</span></button>`;
     }).join("")}</div>
   </section>`;
 }
@@ -1254,7 +1265,7 @@ function renderPlanning() {
     const d = addDays(today, -i), key = dateKey(d);
     rows.push(`<span class="day">${i === 0 ? "Aujourd'hui" : cap(shortDate.format(d))}</span>${SLOTS.map((sl) => {
       const its = slotItems(sl.k); if (!its.length) return `<span class="cell muted">–</span>`;
-      const marks = its.map((it) => { const f = feedFor(key, it.id); if (f) return av(feeder(f.by), "sm"); const past = i > 0 || slotStatus(sl.k, today).s === "late"; return past ? `<span class="miss" title="Pas noté"></span>` : ""; }).join("");
+      const marks = its.map((it) => { const f = feedFor(key, it.id); if (f) return av(feeder(f.by), "sm"); const past = i > 0 || isLate(sl.k, it, today); return past ? `<span class="miss" title="Pas noté"></span>` : ""; }).join("");
       return `<span class="cell">${marks || `<span class="muted small">à venir</span>`}</span>`;
     }).join("")}`);
   }
@@ -1316,11 +1327,11 @@ function renderSante() {
   </section>
   <section class="section">
     <div class="section-head"><h2>Rappels</h2><button class="btn small" data-act="add-reminder">${ICONS.plus}Rappel</button></div>
-    ${rs.length ? `<div class="card list">${rs.map((r) => `<div class="li"><button class="grow li-open" data-act="reminder-edit" data-id="${r.id}" aria-label="Modifier ${esc(reminderName(r))}"><div class="t">${esc(reminderName(r))}</div><div class="s">${dueDate(fromKey(r.next))} · ${everyText(r)}</div></button><span class="chip plain ${r.delta < 0 ? "danger" : r.delta <= 3 ? "warn" : ""}">${r.delta < 0 ? `${-r.delta} j de retard` : r.delta === 0 ? "Aujourd'hui" : `Dans ${r.delta >= 60 ? `${Math.round(r.delta / 30.44)} mois` : `${r.delta} j`}`}</span><button class="btn small" data-act="reminder-done" data-id="${r.id}">Fait</button></div>`).join("")}</div>` : `<p class="card empty">Vermifuge, anti-puces, vaccin… Ajoute un rappel et toute la coloc verra l'échéance.</p>`}
+    ${rs.length ? `<div class="card list">${rs.map((r) => `<div class="li li-tap" data-act="reminder-edit" data-id="${r.id}"><button class="grow li-open" data-act="reminder-edit" data-id="${r.id}" aria-label="Modifier ${esc(reminderName(r))}"><div class="t">${esc(reminderName(r))}</div><div class="s">${dueDate(fromKey(r.next))} · ${everyText(r)}</div></button><span class="chip plain ${r.delta < 0 ? "danger" : r.delta <= 3 ? "warn" : ""}">${r.delta < 0 ? `${-r.delta} j de retard` : r.delta === 0 ? "Aujourd'hui" : `Dans ${r.delta >= 60 ? `${Math.round(r.delta / 30.44)} mois` : `${r.delta} j`}`}</span><button class="btn small" data-act="reminder-done" data-id="${r.id}">Fait</button></div>`).join("")}</div>` : `<p class="card empty">Vermifuge, anti-puces, vaccin… Ajoute un rappel et toute la coloc verra l'échéance.</p>`}
   </section>
   <section class="section">
     <div class="section-head"><h2>Journal santé</h2><button class="btn small" data-act="add-note" data-kind="sante">${ICONS.plus}Note</button></div>
-    ${notes.length ? `<div class="card list">${notes.map(([id, n]) => `<div class="li">${av(feeder(n.by), "sm")}<button class="grow li-open" data-act="note-edit" data-id="${id}" aria-label="Modifier la note"><div>${esc(n.text)}</div><div class="s">${dayMonth.format(new Date(n.at))} · ${esc((feeder(n.by) || {}).name || "")}</div></button></div>`).join("")}</div>` : `<p class="card empty">Vomi, éternuements, visite chez le véto : note-le pour garder l'historique.</p>`}
+    ${notes.length ? `<div class="card list">${notes.map(([id, n]) => `<div class="li li-tap" data-act="note-edit" data-id="${id}">${av(feeder(n.by), "sm")}<button class="grow li-open" data-act="note-edit" data-id="${id}" aria-label="Modifier la note"><div>${esc(n.text)}</div><div class="s">${dayMonth.format(new Date(n.at))} · ${esc((feeder(n.by) || {}).name || "")}</div></button></div>`).join("")}</div>` : `<p class="card empty">Vomi, éternuements, visite chez le véto : note-le pour garder l'historique.</p>`}
   </section>`;
 }
 function spark(entries) {
@@ -1392,9 +1403,10 @@ function skinPicker(current, act) {
 function mealsEditor(slots, ctx) {
   return SLOTS.map((sl) => {
     const s = slots[sl.k] || { time: sl.time, items: [] };
+    const times = [...new Set((s.items || []).map((it) => it.time || s.time || sl.time))].sort(byTime).map(tFmt).join(" · ") || tFmt(s.time || sl.time);
     return `<section class="slot">
-      <div class="slot-head"><h2>${sl.label}</h2><span class="spacer"></span><span class="small muted">Heure</span><button class="btn small tnum" data-act="slot-time" data-ctx="${ctx}" data-slot="${sl.k}" aria-label="Changer l'heure du repas ${OF[sl.k]} (${tFmt(s.time || sl.time)})">${tFmt(s.time || sl.time)}</button></div>
-      <div class="items">${(s.items || []).map((it) => `<div class="item" style="cursor:default"><button class="x" data-act="item-del" data-ctx="${ctx}" data-slot="${sl.k}" data-id="${it.id}" aria-label="Retirer">×</button><button data-act="item-edit" data-ctx="${ctx}" data-slot="${sl.k}" data-id="${it.id}" style="all:unset;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;width:100%"><span class="ty">${esc(TYPES[it.type])}</span>${foodSVG(it.type)}<span class="qty">${esc(it.qty)}</span>${it.stockId && state.stock[it.stockId] ? `<span class="small muted">↧ stock</span>` : ""}</button></div>`).join("")}
+      <div class="slot-head"><h2>${sl.label}</h2><span class="spacer"></span><span class="small muted">Heure</span><button class="btn small tnum" data-act="slot-time" data-ctx="${ctx}" data-slot="${sl.k}" aria-label="Changer les heures du repas ${OF[sl.k]} (${times})">${times}</button></div>
+      <div class="items">${(s.items || []).map((it) => `<div class="item" style="cursor:default"><button class="x" data-act="item-del" data-ctx="${ctx}" data-slot="${sl.k}" data-id="${it.id}" aria-label="Retirer">×</button><button data-act="item-edit" data-ctx="${ctx}" data-slot="${sl.k}" data-id="${it.id}" style="all:unset;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;width:100%"><span class="ty">${esc(TYPES[it.type])}</span>${foodSVG(it.type)}<span class="qty">${esc(it.qty)}${times.includes(" · ") ? ` · ${tFmt(it.time || s.time || sl.time)}` : ""}</span>${it.stockId && state.stock[it.stockId] ? `<span class="small muted">↧ stock</span>` : ""}</button></div>`).join("")}
         <button class="item add" data-act="item-edit" data-ctx="${ctx}" data-slot="${sl.k}" aria-label="Ajouter un aliment au repas ${sl.label}">+</button></div>
     </section>`;
   }).join("");
@@ -1496,7 +1508,7 @@ function doneSheet(slot, id) {
     <form class="form" data-form="feed-time" data-id="${id}">
       <div class="two"><label class="field"><span>Donné en vrai à</span><input id="fd-time" name="time" type="time" required value="${pad(d.getHours())}:${pad(d.getMinutes())}"></label>
       <button class="btn primary" type="submit" style="align-self:end;min-height:48px">Changer l'heure</button></div>
-      <div class="pills"><button type="button" class="btn small" data-act="feed-time" data-id="${id}" data-t="${esc(slotTime(slot))}">À l'heure prévue · ${tFmt(slotTime(slot))}</button></div>
+      <div class="pills"><button type="button" class="btn small" data-act="feed-time" data-id="${id}" data-t="${esc(itemTime(slot, it))}">À l'heure prévue · ${tFmt(itemTime(slot, it))}</button></div>
     </form>
     <p class="label">Ce n'était pas ${esc(by ? by.name : "cette personne")} ? Choisis qui l'a donné :</p>
     <div class="who-grid">${feederList().map((x) => `<button class="who ${x.id === f.by ? "me" : ""}" data-act="change-by" data-id="${id}" data-by="${x.id}" aria-pressed="${x.id === f.by}">${av(x, "lg")}${esc(x.name)}</button>`).join("")}</div>
@@ -1512,7 +1524,7 @@ function itemSheet(ctx, slot, id) {
       <label class="field"><span>Quantité</span><input id="it-qty" name="qty" required maxlength="40" value="${esc(it.qty)}" placeholder="1 cuillère à soupe, 1/2 sachet…"></label>
       <div class="pills">${["1 cuillère à soupe", "1/2 sachet", "1 sachet", "40 g", "1 boîte"].map((v) => `<button type="button" class="btn small" data-act="qty-preset" data-v="${v}">${v}</button>`).join("")}</div>
       <div class="two"><label class="field"><span>Marque</span><input id="it-brand" name="brand" maxlength="40" value="${esc(it.brand)}" placeholder="Facultatif"></label>
-      <label class="field"><span>Heure (facultatif)</span><input id="it-time" name="time" type="time" value="${esc(it.time)}"></label></div>
+      <label class="field"><span>Heure</span><input id="it-time" name="time" type="time" required value="${esc(it.time || (slots[slot] || {}).time || SLOTS.find((s) => s.k === slot).time)}"></label></div>
       ${stocks.length ? `<div class="two"><label class="field"><span>Décompter du stock</span><select id="it-stock" name="stockId"><option value="">Non</option>${stocks.map(([sid, s]) => `<option value="${sid}" ${it.stockId === sid ? "selected" : ""}>${esc(s.name)} (${esc(s.unit)})</option>`).join("")}</select></label>
       <label class="field"><span>Portion</span><input id="it-portion" name="portion" inputmode="decimal" value="${esc(it.portion)}" placeholder="0,5"></label></div>` : `<p class="muted small">Ajoute des produits dans l'onglet Stock pour décompter les portions automatiquement.</p>`}
       <button class="btn primary block" type="submit">Valider</button>
@@ -1520,10 +1532,11 @@ function itemSheet(ctx, slot, id) {
 }
 // a sheet rather than an inline field: the page is redrawn on every sync, which would close the time picker mid-scroll
 function slotTimeSheet(ctx, slot) {
-  const s = (ctx === "draft" ? state.draft.slots : slotsOf(state.config))[slot] || {}, t = s.time || SLOTS.find((x) => x.k === slot).time;
-  openSheet(`<h2>Heure du repas ${OF[slot]}</h2>${ctx === "live" ? `<p class="sub">Toute la coloc verra la nouvelle heure. Le repas passe en retard ${LATE_MIN} min après.</p>` : ""}
+  const s = (ctx === "draft" ? state.draft.slots : slotsOf(state.config))[slot] || {}, t = s.time || SLOTS.find((x) => x.k === slot).time, items = s.items || [];
+  const field = (name, label, v) => `<label class="field"><span>${label}</span><input name="${name}" type="time" required value="${esc(v)}"></label>`;
+  openSheet(`<h2>Heures du repas ${OF[slot]}</h2>${ctx === "live" ? `<p class="sub">Chaque portion a son heure, visible par toute la coloc. Elle passe en retard ${LATE_MIN} min après.</p>` : ""}
     <form class="form" data-form="slot-time" data-ctx="${ctx}" data-slot="${slot}">
-      <label class="field"><span>Heure</span><input id="sl-time" name="time" type="time" required value="${esc(t)}"></label>
+      ${items.length ? items.map((it) => field(`t-${it.id}`, `${esc(TYPES[it.type] || it.type)} · ${esc(it.qty)}`, it.time || t)).join("") : field("time", "Heure", t)}
       <button class="btn primary block" type="submit">Enregistrer</button></form>`);
 }
 function noteSheet(kind, id) {
@@ -1635,7 +1648,7 @@ function feedNow(slot, ids, by) {
   const key = dateKey(); ids = ids.filter((id) => !feedFor(key, id));
   const items = slotItems(slot).filter((it) => ids.includes(it.id)); if (!items.length) return;
   const left = (k) => slotItems(k).filter((it) => !feedFor(key, it.id) && !ids.includes(it.id)).length;
-  const dayDone = SLOTS.every((s) => left(s.k) === 0), slotDone = left(slot) === 0, late = slotStatus(slot).s === "late";
+  const dayDone = SLOTS.every((s) => left(s.k) === 0), slotDone = left(slot) === 0, late = items.some((it) => isLate(slot, it));
   const writes = items.map((it) => feed(slot, it.id, by));
   Push.fed(slot, items, by, writes);
   const t = items[0].type;
@@ -1699,7 +1712,7 @@ const ACT = {
   "cancel-who": () => { state.forceWho = false; render(); },
   "switch-me": () => { state.forceWho = true; closeSheet(); render(); window.scrollTo(0, 0); },
   feed: (ds) => feedFor(dateKey(), ds.id) ? doneSheet(ds.slot, ds.id) : feedNow(ds.slot, [ds.id], state.me),
-  "do-feed-all": (ds) => { closeSheet(); feedNow(ds.slot, slotItems(ds.slot).map((x) => x.id), state.me); },
+  "do-feed-all": (ds) => { closeSheet(); feedNow(ds.slot, ds.ids ? ds.ids.split(",") : slotItems(ds.slot).map((x) => x.id), state.me); },
   "feed-time": (ds) => setFeedTime(ds.id, ds.t),
   "slot-time": (ds) => slotTimeSheet(ds.ctx, ds.slot),
   unfeed: (ds) => { Store.remove(`feeds/${dateKey()}_${ds.id}`); closeSheet(); Sound.play("undo"); toast("Distribution annulée"); },
@@ -1750,11 +1763,13 @@ const FORMS = {
   },
   "feed-time": (fd, form) => setFeedTime(form.dataset.id, String(fd.get("time") || "")),
   "slot-time": (fd, form) => {
-    const ctx = form.dataset.ctx, k = form.dataset.slot, t = String(fd.get("time") || ""); if (!/^\d{1,2}:\d{2}/.test(t)) return;
-    const slots = clone(ctx === "draft" ? state.draft.slots : slotsOf(state.config));
-    slots[k] = slots[k] || { items: [] }; slots[k].time = t.slice(0, 5);
+    const ctx = form.dataset.ctx, k = form.dataset.slot, ok = (v) => /^\d{1,2}:\d{2}/.test(v) ? v.slice(0, 5) : "";
+    const slots = clone(ctx === "draft" ? state.draft.slots : slotsOf(state.config)), s = slots[k] = slots[k] || { items: [] };
+    for (const it of s.items || []) it.time = ok(String(fd.get(`t-${it.id}`) || "")) || it.time;
+    // the meal's own time is its first portion: the default for a new portion, and what older versions of the app still read
+    s.time = ok(String(fd.get("time") || "")) || (s.items || []).map((it) => it.time).filter(Boolean).sort(byTime)[0] || s.time;
     closeSheet(); savePlan(ctx, slots); Sound.play("pop");
-    if (ctx === "live") toast(`Repas ${OF[k]} à ${tFmt(t)}`);
+    if (ctx === "live") toast(`Heures du repas ${OF[k]} enregistrées`);
   },
   note: (fd, form) => {
     const id = form.dataset.id, old = id && state.notes[id];
