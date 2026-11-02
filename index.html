@@ -196,6 +196,7 @@ p { margin: 0; }
 [data-skin="riso"] .slot-head h2, [data-skin="siamois"] .slot-head h2 { font-family: var(--display); }
 [data-skin="riso"] .slot-head h2 { font-weight: 400; }
 .slot-head .time { color: var(--ink-soft); font-weight: 600; }
+.time-btn { font: inherit; font-weight: 600; color: var(--ink-soft); background: none; border: 0; padding: 4px 2px; text-decoration: underline dotted; text-underline-offset: 4px; cursor: pointer; }
 .slot-head .spacer { flex: 1; }
 .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; padding: 3px 10px 3px 3px; border-radius: 999px; background: var(--surface); border: var(--card-border); white-space: nowrap; }
 .chip.plain { padding: 3px 10px; }
@@ -234,6 +235,7 @@ p { margin: 0; }
 .li .grow { flex: 1; min-width: 0; }
 .li .t { font-weight: 700; }
 .li .s { font-size: 13px; color: var(--ink-soft); }
+.li-open { background: none; border: 0; padding: 0; text-align: left; }
 .empty { text-align: center; color: var(--ink-soft); padding: 18px 8px; font-size: 14px; }
 
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 700; border-radius: 999px; padding: 10px 16px; border: var(--card-border); background: var(--surface); color: var(--ink); box-shadow: var(--card-shadow); text-decoration: none; }
@@ -280,6 +282,8 @@ p { margin: 0; }
 .field input::placeholder, .field textarea::placeholder { color: color-mix(in srgb, var(--field-ink) 50%, transparent); }
 fieldset.field { border: 0; margin: 0; padding: 0; min-width: 0; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.every { display: grid; grid-template-columns: 3.4em 1fr; gap: 6px; }
+.every input, .every select { padding-left: 10px; padding-right: 10px; }
 .pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .pill { position: relative; }
 .pill input { position: absolute; opacity: 0; inset: 0; }
@@ -506,9 +510,16 @@ const TABS = [
   { k: "sante", label: "Santé", title: "Carnet de santé" },
   { k: "coloc", label: "Coloc", title: "La coloc" }
 ];
-const REMINDER_PRESETS = [
-  { label: "Vermifuge", days: 90 }, { label: "Anti-puces", days: 30 }, { label: "Vaccin", days: 365 }, { label: "Litière à fond", days: 7 }
+// picking a category on a new reminder pre-fills its usual recurrence
+const REMINDER_CATS = [
+  { k: "vermifuge", label: "Vermifuge", every: 3, unit: "mois", ph: "Milbemax" },
+  { k: "antipuces", label: "Anti-puces", every: 1, unit: "mois", ph: "Frontline" },
+  { k: "vaccin", label: "Vaccin", every: 1, unit: "an", ph: "Typhus, coryza" },
+  { k: "veto", label: "Véto", every: 1, unit: "an", ph: "Bilan annuel" },
+  { k: "litiere", label: "Litière", every: 1, unit: "sem", ph: "Litière à fond" },
+  { k: "autre", label: "Autre", every: 1, unit: "mois", ph: "Couper les griffes" }
 ];
+const REPEAT_UNITS = { j: "jours", sem: "semaines", mois: "mois", an: "ans" };
 const LATE_MIN = 45; // a meal is late this long after its time; the "late" notification goes out then too
 const OF = { matin: "du matin", midi: "du midi", soir: "du soir" };
 const THIS = { matin: "ce matin", midi: "ce midi", soir: "ce soir" };
@@ -532,6 +543,8 @@ const tFmt = (t) => { const m = toMin(t); return m % 60 ? `${Math.floor(m / 60)}
 const longDate = new Intl.DateTimeFormat("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 const shortDate = new Intl.DateTimeFormat("fr-FR", { weekday: "short", day: "numeric" });
 const dayMonth = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short" });
+const dayMonthYear = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short", year: "numeric" });
+const dueDate = (d) => (d.getFullYear() === new Date().getFullYear() ? dayMonth : dayMonthYear).format(d);
 const eur = new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" });
 const num = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 2 });
 const daysBetween = (a, b) => Math.round((fromKey(b) - fromKey(a)) / 864e5);
@@ -1069,6 +1082,32 @@ function stockInfo(id) {
   const level = daysLeft == null ? (remaining <= 0 ? "danger" : "ok") : daysLeft < 2 ? "danger" : daysLeft < alertDays ? "warn" : "ok";
   return { ...s, id, remaining, perDay, daysLeft, level, start: Math.max(Number(s.qty) || 0, remaining) };
 }
+// reminders saved before categories existed only have a label and a number of days
+function reminderCat(r) {
+  const l = (r.label || "").toLowerCase();
+  return REMINDER_CATS.find((c) => c.k === r.cat) || REMINDER_CATS.find((c) => c.k !== "autre" && l.startsWith(c.label.toLowerCase())) || REMINDER_CATS.find((c) => c.k === "autre");
+}
+function reminderName(r) {
+  const c = reminderCat(r), l = (r.label || "").trim();
+  if (c.k === "autre") return l || "Rappel";
+  return !l || l.toLowerCase().startsWith(c.label.toLowerCase()) ? l || c.label : `${c.label} · ${l}`;
+}
+function everyText(r) {
+  const n = Number(r.every) || 1, u = REPEAT_UNITS[r.unit] ? r.unit : "j";
+  return `${u === "sem" ? "toutes les" : "tous les"} ${n > 1 ? `${n} ` : ""}${REPEAT_UNITS[u]}`;
+}
+function addEvery(d, n, unit) {
+  if (unit === "sem") return addDays(d, 7 * n);
+  if (unit !== "mois" && unit !== "an") return addDays(d, n);
+  const x = new Date(d.getFullYear(), d.getMonth() + (unit === "an" ? 12 * n : n), 1);
+  x.setDate(Math.min(d.getDate(), new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate())); // 31 janv. + 1 mois = 28 févr.
+  return x;
+}
+// a new reminder starts from the recurrence the coloc already uses for that category, not the factory one
+function catEvery(c) {
+  const r = c.k === "autre" ? null : ((state.rappels && state.rappels.items) || []).filter((x) => reminderCat(x).k === c.k).pop();
+  return r ? { every: Number(r.every) || 1, unit: REPEAT_UNITS[r.unit] ? r.unit : "j" } : { every: c.every, unit: c.unit };
+}
 function reminders() {
   const items = (state.rappels && state.rappels.items) || [], today = dateKey();
   return items.map((r) => ({ ...r, delta: daysBetween(today, r.next) })).sort((a, b) => a.delta - b.delta);
@@ -1162,7 +1201,7 @@ function renderToday() {
 
   const alerts = [];
   for (const id of Object.keys(state.stock)) { const s = stockInfo(id); if (s && s.level !== "ok") alerts.push(`<button class="alert ${s.level === "danger" ? "danger" : ""}" data-act="tab" data-k="stock">${ICONS.box}<span>${esc(s.name)} : ${s.daysLeft != null ? `environ ${Math.floor(s.daysLeft)} j restants` : "stock épuisé"}</span></button>`); }
-  for (const r of reminders()) if (r.delta <= 3) alerts.push(`<button class="alert ${r.delta < 0 ? "danger" : ""}" data-act="tab" data-k="sante">${ICONS.bell}<span>${esc(r.label)} : ${r.delta < 0 ? `en retard de ${-r.delta} j` : r.delta === 0 ? "aujourd'hui" : `dans ${r.delta} j`}</span></button>`);
+  for (const r of reminders()) if (r.delta <= 3) alerts.push(`<button class="alert ${r.delta < 0 ? "danger" : ""}" data-act="tab" data-k="sante">${ICONS.bell}<span>${esc(reminderName(r))} : ${r.delta < 0 ? `en retard de ${-r.delta} j` : r.delta === 0 ? "aujourd'hui" : `dans ${r.delta} j`}</span></button>`);
 
   const ps = Push.status();
   const pushHint = !Push.prefs.hint && (ps === "off" || ps === "install") ? `<p class="hint">${ICONS.bell}<span>${ps === "install"
@@ -1183,7 +1222,7 @@ function renderToday() {
   ${SLOTS.map((sl) => renderSlot(sl, now)).join("")}
   <section class="section">
     <div class="section-head"><h2>Notes du jour</h2><button class="btn small" data-act="add-note">${ICONS.plus}Ajouter</button></div>
-    ${notes.length ? `<div class="card list">${notes.map(([id, n]) => `<div class="li">${av(feeder(n.by), "sm")}<div class="grow"><div>${esc(n.text)}</div><div class="s">${hFmt(n.at)} · ${esc((feeder(n.by) || {}).name || "")}${n.kind === "sante" ? " · santé" : ""}</div></div><button class="btn ghost small" data-act="del-note" data-id="${id}" aria-label="Supprimer la note">×</button></div>`).join("")}</div>`
+    ${notes.length ? `<div class="card list">${notes.map(([id, n]) => `<div class="li">${av(feeder(n.by), "sm")}<button class="grow li-open" data-act="note-edit" data-id="${id}" aria-label="Modifier la note"><div>${esc(n.text)}</div><div class="s">${hFmt(n.at)} · ${esc((feeder(n.by) || {}).name || "")}${n.kind === "sante" ? " · santé" : ""}</div></button><button class="btn ghost small" data-act="del-note" data-id="${id}" aria-label="Supprimer la note">×</button></div>`).join("")}</div>`
       : `<p class="empty card">Rien à signaler. Une gamelle boudée, un vomi, un câlin record ? Note-le ici pour les autres.</p>`}
   </section>`;
 }
@@ -1192,7 +1231,7 @@ function renderSlot(sl, now) {
   const key = dateKey(now), st = slotStatus(sl.k, now), g = feeder(rotaFor(now, sl.k));
   const chip = st.s === "done" ? `<span class="chip plain ok">Fait</span>` : st.s === "late" ? `<span class="chip plain danger">En retard</span>` : st.s === "now" ? `<span class="chip plain warn">C'est l'heure</span>` : `<span class="chip plain">À ${tFmt(slotTime(sl.k))}</span>`;
   return `<section class="slot" id="slot-${sl.k}">
-    <div class="slot-head"><h2>${sl.label}</h2><span class="time tnum">${tFmt(slotTime(sl.k))}</span><span class="spacer"></span>${g ? `<span class="chip">${av(g, "sm")}${esc(g.name)} de garde</span>` : ""}${chip}</div>
+    <div class="slot-head"><h2>${sl.label}</h2><button class="time-btn tnum" data-act="slot-time" data-ctx="live" data-slot="${sl.k}" aria-label="Changer l'heure du repas ${OF[sl.k]} (${tFmt(slotTime(sl.k))})">${tFmt(slotTime(sl.k))}</button><span class="spacer"></span>${g ? `<span class="chip">${av(g, "sm")}${esc(g.name)} de garde</span>` : ""}${chip}</div>
     <div class="items">${items.map((it) => {
       const f = feedFor(key, it.id);
       if (f) { const by = feeder(f.by); return `<button class="item done" data-act="feed" data-slot="${sl.k}" data-id="${it.id}" aria-label="${esc(TYPES[it.type])} donné par ${esc(by ? by.name : "")}">${CHECK}<span class="by">Distribué à ${hFmt(f.at)}<br>par ${esc(by ? by.name : "?")}</span></button>`; }
@@ -1277,11 +1316,11 @@ function renderSante() {
   </section>
   <section class="section">
     <div class="section-head"><h2>Rappels</h2><button class="btn small" data-act="add-reminder">${ICONS.plus}Rappel</button></div>
-    ${rs.length ? `<div class="card list">${rs.map((r) => `<div class="li"><div class="grow"><div class="t">${esc(r.label)}</div><div class="s">${dayMonth.format(fromKey(r.next))} · tous les ${r.every} j</div></div><span class="chip plain ${r.delta < 0 ? "danger" : r.delta <= 3 ? "warn" : ""}">${r.delta < 0 ? `${-r.delta} j de retard` : r.delta === 0 ? "Aujourd'hui" : `Dans ${r.delta} j`}</span><button class="btn small" data-act="reminder-done" data-id="${r.id}">Fait</button></div>`).join("")}</div>` : `<p class="card empty">Vermifuge, anti-puces, vaccin… Ajoute un rappel et toute la coloc verra l'échéance.</p>`}
+    ${rs.length ? `<div class="card list">${rs.map((r) => `<div class="li"><button class="grow li-open" data-act="reminder-edit" data-id="${r.id}" aria-label="Modifier ${esc(reminderName(r))}"><div class="t">${esc(reminderName(r))}</div><div class="s">${dueDate(fromKey(r.next))} · ${everyText(r)}</div></button><span class="chip plain ${r.delta < 0 ? "danger" : r.delta <= 3 ? "warn" : ""}">${r.delta < 0 ? `${-r.delta} j de retard` : r.delta === 0 ? "Aujourd'hui" : `Dans ${r.delta >= 60 ? `${Math.round(r.delta / 30.44)} mois` : `${r.delta} j`}`}</span><button class="btn small" data-act="reminder-done" data-id="${r.id}">Fait</button></div>`).join("")}</div>` : `<p class="card empty">Vermifuge, anti-puces, vaccin… Ajoute un rappel et toute la coloc verra l'échéance.</p>`}
   </section>
   <section class="section">
     <div class="section-head"><h2>Journal santé</h2><button class="btn small" data-act="add-note" data-kind="sante">${ICONS.plus}Note</button></div>
-    ${notes.length ? `<div class="card list">${notes.map(([, n]) => `<div class="li">${av(feeder(n.by), "sm")}<div class="grow"><div>${esc(n.text)}</div><div class="s">${dayMonth.format(new Date(n.at))} · ${esc((feeder(n.by) || {}).name || "")}</div></div></div>`).join("")}</div>` : `<p class="card empty">Vomi, éternuements, visite chez le véto : note-le pour garder l'historique.</p>`}
+    ${notes.length ? `<div class="card list">${notes.map(([id, n]) => `<div class="li">${av(feeder(n.by), "sm")}<button class="grow li-open" data-act="note-edit" data-id="${id}" aria-label="Modifier la note"><div>${esc(n.text)}</div><div class="s">${dayMonth.format(new Date(n.at))} · ${esc((feeder(n.by) || {}).name || "")}</div></button></div>`).join("")}</div>` : `<p class="card empty">Vomi, éternuements, visite chez le véto : note-le pour garder l'historique.</p>`}
   </section>`;
 }
 function spark(entries) {
@@ -1354,7 +1393,7 @@ function mealsEditor(slots, ctx) {
   return SLOTS.map((sl) => {
     const s = slots[sl.k] || { time: sl.time, items: [] };
     return `<section class="slot">
-      <div class="slot-head"><h2>${sl.label}</h2><span class="spacer"></span><label class="row small muted">Heure <input class="tnum" type="time" id="t-${ctx}-${sl.k}" data-change="slot-time" data-ctx="${ctx}" data-slot="${sl.k}" value="${esc(s.time || sl.time)}" style="background:var(--field-bg);color:var(--field-ink);border:1.5px solid var(--field-border);border-radius:10px;padding:4px 8px"></label></div>
+      <div class="slot-head"><h2>${sl.label}</h2><span class="spacer"></span><span class="small muted">Heure</span><button class="btn small tnum" data-act="slot-time" data-ctx="${ctx}" data-slot="${sl.k}" aria-label="Changer l'heure du repas ${OF[sl.k]} (${tFmt(s.time || sl.time)})">${tFmt(s.time || sl.time)}</button></div>
       <div class="items">${(s.items || []).map((it) => `<div class="item" style="cursor:default"><button class="x" data-act="item-del" data-ctx="${ctx}" data-slot="${sl.k}" data-id="${it.id}" aria-label="Retirer">×</button><button data-act="item-edit" data-ctx="${ctx}" data-slot="${sl.k}" data-id="${it.id}" style="all:unset;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;width:100%"><span class="ty">${esc(TYPES[it.type])}</span>${foodSVG(it.type)}<span class="qty">${esc(it.qty)}</span>${it.stockId && state.stock[it.stockId] ? `<span class="small muted">↧ stock</span>` : ""}</button></div>`).join("")}
         <button class="item add" data-act="item-edit" data-ctx="${ctx}" data-slot="${sl.k}" aria-label="Ajouter un aliment au repas ${sl.label}">+</button></div>
     </section>`;
@@ -1479,11 +1518,23 @@ function itemSheet(ctx, slot, id) {
       <button class="btn primary block" type="submit">Valider</button>
     </form>`);
 }
-function noteSheet(kind) {
-  openSheet(`<h2>${kind === "sante" ? "Note santé" : "Note du jour"}</h2>
-    <form class="form" data-form="note" data-kind="${kind || "note"}"><label class="field"><span>Ce que les autres doivent savoir</span><textarea id="note-text" name="text" rows="3" required maxlength="280" placeholder="${kind === "sante" ? "A vomi après le repas du midi" : "N'a mangé que la moitié de sa pâtée"}"></textarea></label>
-    ${kind === "sante" ? "" : `<label class="pill" style="align-self:flex-start"><input type="checkbox" name="sante" value="1"><span>C'est lié à sa santé</span></label>`}
-    <button class="btn primary block" type="submit">Enregistrer</button></form>`);
+// a sheet rather than an inline field: the page is redrawn on every sync, which would close the time picker mid-scroll
+function slotTimeSheet(ctx, slot) {
+  const s = (ctx === "draft" ? state.draft.slots : slotsOf(state.config))[slot] || {}, t = s.time || SLOTS.find((x) => x.k === slot).time;
+  openSheet(`<h2>Heure du repas ${OF[slot]}</h2>${ctx === "live" ? `<p class="sub">Toute la coloc verra la nouvelle heure. Le repas passe en retard ${LATE_MIN} min après.</p>` : ""}
+    <form class="form" data-form="slot-time" data-ctx="${ctx}" data-slot="${slot}">
+      <label class="field"><span>Heure</span><input id="sl-time" name="time" type="time" required value="${esc(t)}"></label>
+      <button class="btn primary block" type="submit">Enregistrer</button></form>`);
+}
+function noteSheet(kind, id) {
+  const old = id && state.notes[id]; if (id && !old) return;
+  if (old) kind = old.kind;
+  const sante = kind === "sante";
+  openSheet(`<h2>${old ? (sante ? "Modifier la note santé" : "Modifier la note") : sante ? "Note santé" : "Note du jour"}</h2>
+    <form class="form" data-form="note" data-kind="${kind || "note"}" data-id="${old ? id : ""}"><label class="field"><span>Ce que les autres doivent savoir</span><textarea id="note-text" name="text" rows="3" required maxlength="280" placeholder="${sante ? "A vomi après le repas du midi" : "N'a mangé que la moitié de sa pâtée"}">${old ? esc(old.text) : ""}</textarea></label>
+    ${sante ? `<label class="field"><span>Date</span><input id="note-date" name="date" type="date" required min="${dateKey(addDays(new Date(), -120))}" max="${dateKey()}" value="${old ? old.date : dateKey()}"></label>` : `<label class="pill" style="align-self:flex-start"><input type="checkbox" name="sante" value="1"><span>C'est lié à sa santé</span></label>`}
+    <button class="btn primary block" type="submit">Enregistrer</button>
+    ${old ? `<button class="btn block ghost" type="button" data-act="del-note" data-id="${id}">Supprimer cette note</button>` : ""}</form>`);
 }
 function stockSheet(id) {
   const s = id ? state.stock[id] : { name: "", type: "croquettes", unit: "kg", qty: "", alertDays: 5 };
@@ -1535,12 +1586,17 @@ function catSheet() {
 function weightSheet() {
   openSheet(`<h2>Nouvelle pesée</h2><form class="form" data-form="weight"><div class="two"><label class="field"><span>Poids (kg)</span><input id="w-kg" name="kg" inputmode="decimal" required placeholder="4,2"></label><label class="field"><span>Date</span><input id="w-date" name="date" type="date" value="${dateKey()}" required></label></div><button class="btn primary block" type="submit">Enregistrer</button></form>`);
 }
-function reminderSheet() {
-  openSheet(`<h2>Nouveau rappel</h2><form class="form" data-form="reminder">
-    <div class="pills">${REMINDER_PRESETS.map((p) => `<button type="button" class="btn small" data-act="preset" data-label="${esc(p.label)}" data-days="${p.days}">${esc(p.label)}</button>`).join("")}</div>
-    <label class="field"><span>Libellé</span><input id="r-label" name="label" required maxlength="40" placeholder="Vermifuge"></label>
-    <div class="two"><label class="field"><span>Prochaine fois</span><input id="r-next" name="next" type="date" required value="${dateKey()}"></label><label class="field"><span>Répéter tous les (jours)</span><input id="r-every" name="every" inputmode="numeric" required value="30"></label></div>
-    <button class="btn primary block" type="submit">Ajouter</button></form>`);
+function reminderSheet(id) {
+  const old = id && ((state.rappels && state.rappels.items) || []).find((x) => x.id === id);
+  const c = old ? reminderCat(old) : REMINDER_CATS[0];
+  const r = old ? { label: old.label === c.label ? "" : old.label, next: old.next, every: Number(old.every) || 1, unit: REPEAT_UNITS[old.unit] ? old.unit : "j" } : { label: "", next: dateKey(), ...catEvery(c) };
+  openSheet(`<h2>${old ? "Modifier le rappel" : "Nouveau rappel"}</h2><form class="form" data-form="reminder" data-id="${old ? old.id : ""}">
+    <fieldset class="field"><legend>Catégorie</legend><div class="pills">${REMINDER_CATS.map((x) => `<label class="pill"><input type="radio" name="cat" value="${x.k}" ${x.k === c.k ? "checked" : ""}><span>${esc(x.label)}</span></label>`).join("")}</div></fieldset>
+    <label class="field"><span>Libellé</span><input id="r-label" name="label" maxlength="40" value="${esc(r.label)}" placeholder="${esc(c.ph)}"></label>
+    <div class="two"><label class="field"><span>Date</span><input id="r-next" name="next" type="date" required value="${r.next}"></label>
+    <div class="field"><span>Tous les</span><div class="every"><input id="r-every" name="every" inputmode="numeric" required value="${r.every}" aria-label="Nombre"><select id="r-unit" name="unit" aria-label="Unité">${Object.entries(REPEAT_UNITS).map(([k, v]) => `<option value="${k}" ${r.unit === k ? "selected" : ""}>${v}</option>`).join("")}</select></div></div></div>
+    <button class="btn primary block" type="submit">${old ? "Enregistrer" : "Ajouter"}</button>
+    ${old ? `<button class="btn block ghost" type="button" data-act="reminder-del" data-id="${old.id}">Supprimer ce rappel</button>` : ""}</form>`);
 }
 function rotaSheet(cell) {
   const [d, k] = cell.split("-"); const cur = (state.config.rota || {})[cell] || "";
@@ -1645,9 +1701,11 @@ const ACT = {
   feed: (ds) => feedFor(dateKey(), ds.id) ? doneSheet(ds.slot, ds.id) : feedNow(ds.slot, [ds.id], state.me),
   "do-feed-all": (ds) => { closeSheet(); feedNow(ds.slot, slotItems(ds.slot).map((x) => x.id), state.me); },
   "feed-time": (ds) => setFeedTime(ds.id, ds.t),
+  "slot-time": (ds) => slotTimeSheet(ds.ctx, ds.slot),
   unfeed: (ds) => { Store.remove(`feeds/${dateKey()}_${ds.id}`); closeSheet(); Sound.play("undo"); toast("Distribution annulée"); },
   "add-note": (ds) => noteSheet(ds.kind),
-  "del-note": (ds) => { const p = `notes/${ds.id}`, prev = clone(state.notes[ds.id]); Store.remove(p); Sound.play("undo"); toast("Note supprimée", { label: "Annuler", fn: () => { if (prev) Store.set(p, prev); Sound.play("pop"); } }); },
+  "note-edit": (ds) => noteSheet(null, ds.id),
+  "del-note": (ds) => { const p = `notes/${ds.id}`, prev = clone(state.notes[ds.id]); Store.remove(p); closeSheet(); Sound.play("undo"); toast("Note supprimée", { label: "Annuler", fn: () => { if (prev) Store.set(p, prev); Sound.play("pop"); } }); },
   rota: (ds) => rotaSheet(ds.cell),
   "set-rota": (ds) => { saveConfig({ rota: { ...(state.config.rota || {}), [ds.cell]: ds.id } }); closeSheet(); },
   "rota-auto": () => { saveConfig({ rota: autoRota(feederList()) }); toast("Garde répartie à tour de rôle"); },
@@ -1666,9 +1724,10 @@ const ACT = {
   "item-edit": (ds) => itemSheet(ds.ctx, ds.slot, ds.id),
   "item-del": (ds) => { const slots = clone(ds.ctx === "draft" ? state.draft.slots : slotsOf(state.config)); slots[ds.slot].items = slots[ds.slot].items.filter((x) => x.id !== ds.id); savePlan(ds.ctx, slots); },
   "add-weight": weightSheet,
-  "add-reminder": reminderSheet,
-  preset: (ds) => { $("#r-label").value = ds.label; $("#r-every").value = ds.days; },
-  "reminder-done": (ds) => { const items = clone((state.rappels && state.rappels.items) || []); const r = items.find((x) => x.id === ds.id); if (!r) return; r.next = dateKey(addDays(new Date(), Number(r.every) || 30)); Store.set("sante/rappels", { items }); Sound.play("sparkle"); toast(`${r.label} : prochain le ${dayMonth.format(fromKey(r.next))}`); }
+  "add-reminder": () => reminderSheet(),
+  "reminder-edit": (ds) => reminderSheet(ds.id),
+  "reminder-del": (ds) => { const prev = clone((state.rappels && state.rappels.items) || []); Store.set("sante/rappels", { items: prev.filter((x) => x.id !== ds.id) }); closeSheet(); Sound.play("undo"); toast("Rappel supprimé", { label: "Annuler", fn: () => { Store.set("sante/rappels", { items: prev }); Sound.play("pop"); } }); },
+  "reminder-done": (ds) => { const items = clone((state.rappels && state.rappels.items) || []); const r = items.find((x) => x.id === ds.id); if (!r) return; r.next = dateKey(addEvery(new Date(), Number(r.every) || 1, r.unit)); Store.set("sante/rappels", { items }); Sound.play("sparkle"); toast(`${reminderName(r)} : prochain le ${dueDate(fromKey(r.next))}`); }
 };
 
 const FORMS = {
@@ -1690,7 +1749,22 @@ const FORMS = {
     savePlan(ctx, slots); closeSheet(); Sound.play("pop");
   },
   "feed-time": (fd, form) => setFeedTime(form.dataset.id, String(fd.get("time") || "")),
-  note: (fd, form) => { const kind = form.dataset.kind === "sante" || fd.get("sante") ? "sante" : "note"; Store.set(`notes/${uid()}`, { date: dateKey(), at: Date.now(), by: state.me, text: fd.get("text").trim(), kind }); closeSheet(); Sound.play("blop"); toast("Note partagée"); },
+  "slot-time": (fd, form) => {
+    const ctx = form.dataset.ctx, k = form.dataset.slot, t = String(fd.get("time") || ""); if (!/^\d{1,2}:\d{2}/.test(t)) return;
+    const slots = clone(ctx === "draft" ? state.draft.slots : slotsOf(state.config));
+    slots[k] = slots[k] || { items: [] }; slots[k].time = t.slice(0, 5);
+    closeSheet(); savePlan(ctx, slots); Sound.play("pop");
+    if (ctx === "live") toast(`Repas ${OF[k]} à ${tFmt(t)}`);
+  },
+  note: (fd, form) => {
+    const id = form.dataset.id, old = id && state.notes[id];
+    const kind = form.dataset.kind === "sante" || fd.get("sante") ? "sante" : "note";
+    // a health note can be dated after the fact: it moves to that day and keeps its time of day
+    const date = fd.get("date") || (old ? old.date : dateKey()), t = new Date(old ? old.at : Date.now()), d = fromKey(date);
+    d.setHours(t.getHours(), t.getMinutes(), t.getSeconds(), t.getMilliseconds());
+    Store.set(`notes/${id || uid()}`, { ...(old ? clone(old) : { by: state.me }), date, at: d.getTime(), text: fd.get("text").trim(), kind });
+    closeSheet(); Sound.play("blop"); toast(old ? "Note modifiée" : "Note partagée");
+  },
   stock: (fd, form) => { const id = form.dataset.id || uid(); Store.set(`stock/${id}`, { name: fd.get("name").trim(), type: fd.get("type") || "croquettes", unit: fd.get("unit"), qty: parseNum(fd.get("qty")), restockAt: Date.now(), alertDays: parseNum(fd.get("alertDays")) || 5 }); closeSheet(); Sound.play("crunch"); toast("Stock enregistré"); },
   restock: (fd, form) => {
     const id = form.dataset.id, s = stockInfo(id); const add = parseNum(fd.get("qty")), price = parseNum(fd.get("price"));
@@ -1702,7 +1776,13 @@ const FORMS = {
   expense: (fd) => { Store.set(`achats/${uid()}`, { by: fd.get("by"), at: Date.now(), label: fd.get("label").trim(), amount: parseNum(fd.get("amount")) }); closeSheet(); Sound.play("coin"); toast("Dépense ajoutée"); },
   feeder: (fd, form) => { const id = form.dataset.id || uid(); const prev = state.feeders[id] || { theme: "velours", uid: "", order: feederList().length }; Store.set(`feeders/${id}`, { ...clone(prev), name: fd.get("name").trim(), color: fd.get("color") || prev.color || COLORS[0] }); closeSheet(); },
   weight: (fd) => { const entries = clone((state.poids && state.poids.entries) || []).filter((e) => e.date !== fd.get("date")); entries.push({ date: fd.get("date"), kg: parseNum(fd.get("kg")), by: state.me }); entries.sort((a, b) => a.date.localeCompare(b.date)); Store.set("sante/poids", { entries: entries.slice(-120) }); closeSheet(); Sound.play("pop"); toast("Pesée enregistrée"); },
-  reminder: (fd) => { const items = clone((state.rappels && state.rappels.items) || []); items.push({ id: uid(), label: fd.get("label").trim(), next: fd.get("next"), every: parseNum(fd.get("every")) || 30 }); Store.set("sante/rappels", { items }); closeSheet(); Sound.play("sparkle"); toast("Rappel ajouté"); }
+  reminder: (fd, form) => {
+    const items = clone((state.rappels && state.rappels.items) || []), id = form.dataset.id;
+    const r = { id: id || uid(), cat: fd.get("cat") || "autre", label: fd.get("label").trim(), next: fd.get("next"), every: Math.max(1, Math.round(parseNum(fd.get("every")))) || 1, unit: fd.get("unit") || "j" };
+    const i = items.findIndex((x) => x.id === r.id);
+    if (i >= 0) items[i] = r; else items.push(r);
+    Store.set("sante/rappels", { items }); closeSheet(); Sound.play("sparkle"); toast(id ? "Rappel enregistré" : "Rappel ajouté");
+  }
 };
 
 document.addEventListener("click", (e) => {
@@ -1713,13 +1793,17 @@ document.addEventListener("submit", (e) => { const f = e.target.closest("form[da
 document.addEventListener("input", (e) => {
   const el = e.target;
   if (el.id === "coloc-code") state.codeDraft = el.value;
+  if (el.id === "r-every" || el.id === "r-unit") el.form.dataset.picked = "1";
   if (el.dataset.input === "draft-feeder") state.draft.feeders[+el.dataset.i].name = el.value;
   if (el.closest("form[data-form=flow-cat]") && state.draft) { const fd = new FormData(el.form); Object.assign(state.draft.cat, { name: fd.get("name"), breed: fd.get("breed"), age: fd.get("age"), coat: fd.get("coat") || state.draft.cat.coat, sex: fd.get("sex") || state.draft.cat.sex }); }
 });
 document.addEventListener("change", (e) => {
   const el = e.target;
-  if (el.dataset.change === "slot-time") { const ctx = el.dataset.ctx; const slots = clone(ctx === "draft" ? state.draft.slots : slotsOf(state.config)); slots[el.dataset.slot] = slots[el.dataset.slot] || { items: [] }; slots[el.dataset.slot].time = el.value; savePlan(ctx, slots); }
-});
+  if (el.name === "cat" && el.form && el.form.dataset.form === "reminder") {
+    const c = REMINDER_CATS.find((x) => x.k === el.value); $("#r-label").placeholder = c.ph;
+    // only while the recurrence is untouched: picking the category after typing 30 days must not put it back to 1 week
+    if (!el.form.dataset.id && !el.form.dataset.picked) { const e = catEvery(c); $("#r-every").value = e.every; $("#r-unit").value = e.unit; }
+  }});
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#sheet-root").innerHTML) closeSheet(); });
 
 /* ---------- boot ---------- */
